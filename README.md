@@ -6,18 +6,18 @@ https://en.wikipedia.org/wiki/LLVM
 * collection of modular and reusable compiler and toolchain technologies
 * used to develop compiler front and back ends
 * written in C++
-* designed for compile-time, link-time, run-times nd idle-time optimization of programs in arbitrary programming languages
-* LLVM initially stood for Low Level VIRtual Machine, name now just refers to the umbrella project of the LLVM IR, LLVM Debugger, LLVM implementation of the C++ standard library, etc.
+* designed for compile-time, link-time, run-times and idle-time optimization of programs in arbitrary programming languages
+* LLVM initially stood for Low Level Virtual Machine, name now just refers to the umbrella project of the LLVM IR, LLVM Debugger, LLVM implementation of the C++ standard library, etc.
 * LLVM administered by LLVM foundation, president & compiler engineer Tanya Lattner
 * GCC has historically outperformed LLVM by about 10% on average, newer reports indicate that speeds between the two are now comparable
 
 #### History:
-* work started on LLVM in 2000 at UofIllinois at Urbana Champaign
-* under dIRection of Vikram Adve and Chris Lattner
+* work started on LLVM in 2000 at University of Illinois at Urbana Champaign
+* under direction of Vikram Adve and Chris Lattner
 * originally developed as research infrastructure to investigate dynamic compilation techniques for static and dynamic programming languages
 * written to be a replacement for the existing code generator in the GCC stack
 * released under a permissive free software license
-* in 2005, Apple hIRes Lattner to work on LLVM for use in Apple development systems
+* in 2005, Apple hires Lattner to work on LLVM for use in Apple development systems
 * becomes and integral part of macOS and iOS
 * in 2012, awarded a ACM Software System Award by the Acm
 * in 2013, Sony uses Clang (a front end for LLVM) in SDK for ps4
@@ -56,7 +56,7 @@ https://en.wikipedia.org/wiki/LLVM
 
 #### Linker:
 * lld project is a built-in platform independent linker for LLVM
-* removes dependance on thIRd party linkers
+* removes dependance on third party linkers
 * supports ELF, PE/COFF, Mach-O
 
 #### Hello world in IR:
@@ -84,7 +84,7 @@ http://www.aosabook.org/en/LLVM.html
 
 ### Other modular designs in compilers:
 
-#### Java VIRtual Machine
+#### Java Virtual Machine
 * Java uses a JIT compiler, runtime support, and byte code format
 * So anyone can produce byte code and use Java runtime and JIT compiler
 * But then, forced to use garbage collection, particular object model, very little flexibility. suboptimal performance when compiling languages very unlike Java (ex. C)
@@ -106,7 +106,7 @@ http://www.aosabook.org/en/LLVM.html
 * IR must be easy for front end to generate, and expressive enough to perform important optimizations for real targets
 
 * instructions are in three address form, take some number of inputs and produce and output in a different register
-* IR is like a low level, RISC like vIRtual instructions et
+* IR is like a low level, RISC like virtual instructions et
 * supports linear sequences of simple instructions like add, subtraction, compare, branch
 
 * strongly typed in a simple type system
@@ -172,7 +172,7 @@ for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I)
 * for Clang, running -O0 would run no optimizations, -O3 would run 67 optimizations (as of LLVM 2.8)
 * each pass derives from the Pass class
 * most passes written in a single .cpp file
-* theIR subclass of Pass defined in an anonymous namespace (completely private to defining file)
+* their subclass of Pass defined in an anonymous namespace (completely private to defining file)
 * code outside file needs to get the pass, so a single function is exported to create the file
 
 * ex:
@@ -182,7 +182,7 @@ namespace {
   class Hello : public FunctionPass {
   public:
     // Print out the names of functions in the LLVM IR being optimized.
-    vIRtual bool runOnFunction(Function &F) {
+    virtual bool runOnFunction(Function &F) {
       cerr << "Hello: " << F.getName() << "\n";
       return false;
     }
@@ -245,7 +245,7 @@ https://www.ibm.com/developerworks/library/os-createcompilerLLVM1/
 
 * llc converts LLVM bytecode to platform specific assembly code
 * then you would run a native assembler to output machine code
-* lli dIRectly executes the LLVM bytecode
+* lli directly executes the LLVM bytecode
 
 * LLVM-gcc is a modified gcc that can emit LLVM byte code by using -S -emit-LLVM options
 * emits a .ll file
@@ -311,19 +311,19 @@ define i32 @main() {
 * can contain a list of global variables, functions, other module dependancies, symbol tables, etc.
 * constructor for a module:
 * `explicit Module(StringRef ModuleID, LLVMContext& C);`
-* fIRst argument is the name of the module
+* first argument is the name of the module
 * second argument is the module context for variable creation (come in handy for mutli-threading)
 * can use a global context for simple example programs:
 `LLVM::getGlobalContext();`
 
 * IRBuilder class actually provides the API for creating LLVM instructions, inserts them into basic blocks
-`LLVM::IRBuilder<> builder(Context);`
+`LLVM::irBuilder<> builder(Context);`
 
 * when the object model is ready, the instructions can be dumped with the modules `dump` method
 `Module->dump`
 
 
-# Description of the LLVM source DIRectory:
+# Description of the LLVM source Directory:
 
 http://LLVM.org/docs/GettingStarted.html#for-developers-to-work-with-a-git-monorepo
 
@@ -335,19 +335,19 @@ http://LLVM.org/docs/GettingStarted.html#for-developers-to-work-with-a-git-monor
 
 #### LLVM/lib
 source files for LLVM
-* /IR - core LLVM classes - BasicBlock, Instruction
+* /ir - core LLVM classes - BasicBlock, Instruction
 * /AsmParser - assembly language parser library
 * /BitCode - code for reading and writing bitcode
 * /analysis - variety of program analyses - Call Graphs, Induction Variables
-* /Transform - IR-to-IR program transformations - inlining, dead code elimination
+* /Transform - IR-to-ir program transformations - inlining, dead code elimination
 * /Target - files holding machine descriptions of several architectures - x86, ARM
 * /CodeGen - major parts of the code generator - Instruction Selector, Instruction Scheduling
-* /ExecutionEngine - libraries for dIRectly executing bitcode at runtime in interpreted and JIT-compiled scenarios
+* /ExecutionEngine - libraries for directly executing bitcode at runtime in interpreted and JIT-compiled scenarios
 * /Support - source code for header files in LLVM/include/ADT and LLVM/include/Support
 
 #### LLVM/Projects
-this dIRectory contains projects not necessarily part of LLVM, but shipped with LLVM.
-* Importantly, this is the dIRectory where user-created projects taking advantage of the LLVM build system would go
+this directory contains projects not necessarily part of LLVM, but shipped with LLVM.
+* Importantly, this is the directory where user-created projects taking advantage of the LLVM build system would go
 
 #### LLVM/test
 quick, exhaustive feature & regression tests of LLVM itself
@@ -357,9 +357,9 @@ executables built out of the LLVM libraries. These format he main part of the us
 * /bugpoint - used to debug optimization passes, code generation backends. works by narrowing down test cases to the ones that cause a crash/error
 * /LLVM-ar - archiver, produces archive file containing given LLVM files
 * /LLVM-as - assembler, LLVM asm -> LLVM bitcode
-* /LLVM-dIR - disassembler, LLVM bitcode -> LLVM asm
+* /LLVM-dir - disassembler, LLVM bitcode -> LLVM asm
 * /LLVM-link - links multiple LLVM modules into a single program
-* /lli - LLVM interpreter, dIRectly executes LLVM bitcode.
+* /lli - LLVM interpreter, directly executes LLVM bitcode.
 * /llc - LLVM native compiler, compiles LLVM bitcode to native assembly code file
 * /opt - applies LLVM to LLVM transformations, optimizations. opt -help to get all optimizations available
 * can also run analysis on a given LLVM input bitcode file, useful for debugging analysis, or getting familiar with a particular analysis' function
@@ -368,6 +368,6 @@ executables built out of the LLVM libraries. These format he main part of the us
 utilities for working with LLVM source code
 * /codegen-diff - finds differences between code theat llcm generates, and code that lli generates
 * /emacs, /vim - syntax highlighting
-* /getsrcs.sh - finds all non-generated source files in LLVM, useful for developing across dIRectories
-* /makeLLVM - compiles all files in the current dIRectory
+* /getsrcs.sh - finds all non-generated source files in LLVM, useful for developing across directories
+* /makeLLVM - compiles all files in the current directory
 * /TableGen - generates register descriptions, instruction set desciptions, assemblers
