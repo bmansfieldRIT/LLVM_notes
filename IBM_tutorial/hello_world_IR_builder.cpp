@@ -54,7 +54,7 @@ int main(){
     builder.CreateCall(putsFunc, helloWorld);
 
     // create the return value;
-    llvm::Value *retval(llvm::Type::getInt32Ty(Context));
+    llvm::ConstantInt *retval = llvm::ConstantInt::get(llvm::Type::getInt32Ty(Context), 0, false);
     builder.CreateRet(retval);
 
     // show the modules contents
