@@ -250,7 +250,7 @@ https://www.ibm.com/developerworks/library/os-createcompilerLLVM1/
 * LLVM-gcc is a modified gcc that can emit LLVM byte code by using -S -emit-LLVM options
 * emits a .ll file
 
-* an .ll file for hello_world.c
+an .ll file for hello_world.c:
 
 ```LLVM
 ; ModuleID = 'hello_world.c'
@@ -283,7 +283,7 @@ attributes #1 = { "correctly-rounded-divide-sqrt-fp-math"="false" "disable-tail-
 * local identifiers start with %
 * handy regular expression for identifiers: [%@][a-zA-Z$.\_][a-zA-Z$.\_0-9]&ast;
 
-* comments start with ;
+* comments start with `;`
 * vectors are declared as [number of elements x size of elements]
 
 * possible to handwrite programs in LLVM bytecode:
@@ -307,7 +307,7 @@ define i32 @main() {
 * sample build command:
 * ```clang hello_world.o `LLVM-config --ldflags --system-libs --libs` -o hello```
 
-* a Module is a containerfor all other LLVM IR objects
+* a Module is a container for all other LLVM IR objects
 * can contain a list of global variables, functions, other module dependancies, symbol tables, etc.
 * constructor for a module:
 * `explicit Module(StringRef ModuleID, LLVMContext& C);`
@@ -317,7 +317,7 @@ define i32 @main() {
 `LLVM::getGlobalContext();`
 
 * IRBuilder class actually provides the API for creating LLVM instructions, inserts them into basic blocks
-`LLVM::irBuilder<> builder(Context);`
+`LLVM::IRBuilder<> builder(Context);`
 
 * when the object model is ready, the instructions can be dumped with the modules `dump` method
 `Module->dump`
@@ -327,23 +327,23 @@ define i32 @main() {
 
 http://LLVM.org/docs/GettingStarted.html#for-developers-to-work-with-a-git-monorepo
 
-* LLVM/examples - contains useful examples of programs utilizing LLVM features, IR, JIT
+* `LLVM/examples` - contains useful examples of programs utilizing LLVM features, IR, JIT
 
 #### LLVM/include
-* /LLVM - LLVM specific header files
-* /LLVM/Support - generic support libraries not necessarily tied to LLVM (ex. command line option processing library header files)
+* `/LLVM` - LLVM specific header files
+* `/LLVM/Support` - generic support libraries not necessarily tied to LLVM (ex. command line option processing library header files)
 
 #### LLVM/lib
 source files for LLVM
-* /ir - core LLVM classes - BasicBlock, Instruction
-* /AsmParser - assembly language parser library
-* /BitCode - code for reading and writing bitcode
-* /analysis - variety of program analyses - Call Graphs, Induction Variables
-* /Transform - IR-to-ir program transformations - inlining, dead code elimination
-* /Target - files holding machine descriptions of several architectures - x86, ARM
-* /CodeGen - major parts of the code generator - Instruction Selector, Instruction Scheduling
-* /ExecutionEngine - libraries for directly executing bitcode at runtime in interpreted and JIT-compiled scenarios
-* /Support - source code for header files in LLVM/include/ADT and LLVM/include/Support
+* `/IR` - core LLVM classes - BasicBlock, Instruction
+* `/AsmParser` - assembly language parser library
+* `/BitCode` - code for reading and writing bitcode
+* `/analysis` - variety of program analyses - Call Graphs, Induction Variables
+* `/Transform` - IR-to-IR program transformations - inlining, dead code elimination
+* `/Target` - files holding machine descriptions of several architectures - x86, ARM
+* `/CodeGen` - major parts of the code generator - Instruction Selector, Instruction Scheduling
+* `/ExecutionEngine` - libraries for directly executing bitcode at runtime in interpreted and JIT-compiled scenarios
+* `/Support` - source code for header files in LLVM/include/ADT and LLVM/include/Support
 
 #### LLVM/Projects
 this directory contains projects not necessarily part of LLVM, but shipped with LLVM.
@@ -354,20 +354,72 @@ quick, exhaustive feature & regression tests of LLVM itself
 
 #### LLVM/tools
 executables built out of the LLVM libraries. These format he main part of the user interface for LLVM
-* /bugpoint - used to debug optimization passes, code generation backends. works by narrowing down test cases to the ones that cause a crash/error
-* /LLVM-ar - archiver, produces archive file containing given LLVM files
-* /LLVM-as - assembler, LLVM asm -> LLVM bitcode
-* /LLVM-dir - disassembler, LLVM bitcode -> LLVM asm
-* /LLVM-link - links multiple LLVM modules into a single program
-* /lli - LLVM interpreter, directly executes LLVM bitcode.
-* /llc - LLVM native compiler, compiles LLVM bitcode to native assembly code file
-* /opt - applies LLVM to LLVM transformations, optimizations. opt -help to get all optimizations available
+* `/bugpoint` - used to debug optimization passes, code generation backends. works by narrowing down test cases to the ones that cause a crash/error
+* `/LLVM-ar` - archiver, produces archive file containing given LLVM files
+* `/LLVM-as` - assembler, LLVM asm -> LLVM bitcode
+* `/LLVM-dir` - disassembler, LLVM bitcode -> LLVM asm
+* `/LLVM-link` - links multiple LLVM modules into a single program
+* `/lli` - LLVM interpreter, directly executes LLVM bitcode.
+* `/llc` - LLVM native compiler, compiles LLVM bitcode to native assembly code file
+* `/opt` - applies LLVM to LLVM transformations, optimizations. opt -help to get all optimizations available
 * can also run analysis on a given LLVM input bitcode file, useful for debugging analysis, or getting familiar with a particular analysis' function
 
 #### LLVM/utils
 utilities for working with LLVM source code
-* /codegen-diff - finds differences between code theat llcm generates, and code that lli generates
-* /emacs, /vim - syntax highlighting
-* /getsrcs.sh - finds all non-generated source files in LLVM, useful for developing across directories
-* /makeLLVM - compiles all files in the current directory
-* /TableGen - generates register descriptions, instruction set desciptions, assemblers
+* `/codegen-diff` - finds differences between code that llcm generates, and code that lli generates
+* `/emacs`, `/vim` - syntax highlighting
+* `/getsrcs.sh` - finds all non-generated source files in LLVM, useful for developing across directories
+* `/makeLLVM` - compiles all files in the current directory
+* `/TableGen` - generates register descriptions, instruction set descriptions, assemblers
+
+
+#### Hello World Example
+* compile a hello world program
+* compile to LLVM bitcode
+`clang -O3 -emit-llvm hello.c -c -o hello.bc`
+* run the LLVM interpreter
+`lli hello.bc`
+* view the LLVM assembly code
+`llvm-dis < hello.bc | less`
+* compile program to native assembly with LLVM code generator
+`llc hello.bc -o hello.s`
+* assemble native assembly
+`gcc hello.s -o hello.native`
+* execute the native code program
+`./hello.native`
+
+
+LLVM's Kaleidoscope Tutorial:
+
+http://llvm.org/docs/tutorial/LangImpl01.html
+
+#### Kaleidoscope
+procedural language, define functions, use conditionals, math
+will extend to support if/then/else, for, user defined ops, JIT compilation
+single datatype is a 64 bit floating point type (double in C)
+thus implicitly double precision and no type declarations
+example
+
+```kaleidoscope
+# Compute the x'th fibinocci number
+def fib(x)
+    if x < 3 then
+        1
+    else
+        fib(x-1)+fib(x-2)
+
+# This expression will compute the 40th number
+fib(40)
+```
+
+can call into standard lib functions
+`extern` keyword defines a function before its use
+ex.
+
+```kaleidoscope
+extern sin(arg);
+extern cos(arg);
+extern atan2(arg1, arg2);
+
+atan2(sin(.4), cos(42))
+```
