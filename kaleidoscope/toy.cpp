@@ -22,6 +22,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "KaleidoscopeJIT.h"
 
 using namespace llvm;
 
@@ -29,6 +30,7 @@ static LLVMContext TheContext;
 static IRBuilder<> Builder(TheContext);
 static std::unique_ptr<Module> TheModule;
 static std::map<std::string, Value *> NamedValues;
+static std::unique_ptr<KaleidoscopeJIT> TheJIT;
 
 // lexer returns tokens [0-255] if it is an unknown character, otherwise one
 // of these for known things
@@ -482,12 +484,35 @@ Function *FunctionAST::codegen(){
 
         // validate the generated code, chekcing for consistency
         verifyFunction(*TheFunction);
+
+        // optimize the function
+        TheFPM->run(*TheFunction);
+
         return TheFunction;
     }
 
     // error reading body, remove function
     TheFunction->eraseFromParent();
     return nullptr;
+}
+
+void InitializeModuleAndPassManager(){
+    // open a new module
+    TheModule = llvm::make_unique<Module>("mycool jit", TheContext)
+    TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
+
+    // create a new pass manager attached to it
+    TheFPM = llvm::make_unique<FunctionPassManager>(TheModule.get());
+    // do simple 'peephole' optimizations and bit-twiddling optimizations
+    TheFPM->add(createIntructionCombiningPass());
+    // reassociate expressions
+    TheFPM->add(createReassociatePass());
+    // eliminate common subexpressions
+    TheFPM->add(createGVNPass());
+    // simplify the control flow graph (delete unreachable block, etc.)
+    TheFPM->add(createCFGSimplificationPass());
+
+    TheFPM->doInitialization();
 }
 
 static void HandleDefinition() {
@@ -553,6 +578,11 @@ static void MainLoop(){
 }
 
 int main() {
+
+    InitializeNativeTarget();
+    InitializeNativeTargetAsmPrinter();
+    InitializeNativeTargetAsmParser();
+
     // Install standard binary operators
     // 1 is the lowest precedence
     BinopPrecedence['<'] = 10;
@@ -564,14 +594,10 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
-    // Make the module, which holds all the code.
-    TheModule = llvm::make_unique<Module>("my cool jit", TheContext);
+    TheJit = llvm::make_unique<KaleidoscopeJIT>();
 
     // run the main interpreter loop now
     MainLoop();
-
-    // Print out all of the generated code.
-    TheModule->print(errs(), nullptr);
 
     return 0;
 }
