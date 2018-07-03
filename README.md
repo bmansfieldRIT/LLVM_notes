@@ -33,6 +33,23 @@ https://en.wikipedia.org/wiki/LLVM
 * JIT compiler can optimize unneeded static branches out of a program at runtime (useful for partial evaluation)
 * example: used in OpenGL pipeline on Mac OSX Leopard to support missing hardware features. leave code in IR, then compile based on what features the GPU actually has, for high end GPUs leave code as is, for low end GPUs, may need to simulate some advanced instructions in the CPU.
 
+* Note on SSA:
+* SSA enables, or strongly enhances many compiler optimization algorithms, such as dead code elimination, constant propagation, register allocation, etc.
+* consider:
+```
+y := 1
+y := 2
+z := y
+```
+
+* if program is in SSA form, we can easily parse out dead code, constants propagation
+
+```
+y1 := 1
+y2 := 2
+z1 := y2
+```
+
 #### LLVM type System:
 * basic types: integer, floating point
 * derived types: pointers, arrays, vectors, structures, and functions
@@ -238,7 +255,6 @@ define i32 @test() {
 * APIs will often be aggressively changed, even the core IR, so backwards compatibility is not a major concern for LLVM
 * this is done in the name of rapid forward progress/prototyping
 
-
 # Create a working compiler with the LLVM framework, Part 1
 
 https://www.ibm.com/developerworks/library/os-createcompilerLLVM1/
@@ -423,3 +439,45 @@ extern atan2(arg1, arg2);
 
 atan2(sin(.4), cos(42))
 ```
+
+#### Notes from Section 3
+* Types and Constants are uniqued in LLVM (only one, so you don't 'new' a constant or a type, you 'get' them, and if one doesn't exist, it is created for you)
+* essentially a singleton pattern, with some minor caveats
+* Context holds a lot of core LLVM data structures, like type and constant value tables
+* usually just need a single instance to pass into APIs
+* the LLVM module holds the functions and global variables, so we check against that to make sure a function exists
+* module is essentially the top level structure that LLVM IR uses to contain code
+* IRBuilder class keeps track of the current place to insert instructions, contains methods to create new instructions
+* `verifyFunction()` is a very useful LLVM function, performs a variety of consistency checks on the functions, can catch a lot of bugs
+
+
+#### Notes from Section 4
+* functions are generated as user types them in, so we can apply some per-function optimizations as user types them in
+* for a static compiler, we would hold off on applying optimizations until entire file has been parsed
+* FunctionPassManager holds and organizes LLVM optimizations
+* Need to create a FunctionPassManager for each module to optimize
+
+##### FunctionPassManager
+ * Takes a list of passes, ensures prerequisites are setup, schedules passes
+ * shares analysis results with passes, and tracks lifetime of results for efficient memory management
+ * pipelines execution of passes on program, aka runs all passes on 1st function, then 2nd function, etc.
+ * using a `PassManager` exposes `--debug-pass` option for diagnosing pass executions
+
+* attach a `FunctionPassManager` to the Module, then add optimization passes to it
+* We can also do other things such as add a JIT compiler to directly evaluate the top-level expressions
+
+##### Adding a JIT compiler
+* since LLVM ~5.0.1, ORC (on request compiler) is standard LLVM JIT tool
+* compile with option `llvm-config orcjit`
+* create environment for code generation (init target, asmPrinter, asmParser)
+* kaleidoscopeJIT used for tutorials
+    * simply adds LLVM IR modules to JIT, making functions avilable for execution,
+    * removeModule() frees memory,
+    * findSymbol() looks up pointers to compiled code
+* now w4e modify codegen() functions to add modules of IR to the JIT instead of just printing them.
+* there is no difference between JIT compiled code and native machine code statically linked into the application!
+* JIT will resolve function calls across modules as long as each function has a prototype and is added to the JIT before calling
+* so we put every function into its own module, where you can have multiple definitions of a function (unlike in a module, where every function myst be unique)
+* KaleidoscopeJIT will always return the msot recent definition
+* for each funciton to live in its own module, we must have a way regenerate prev function declarations in new modules
+*
