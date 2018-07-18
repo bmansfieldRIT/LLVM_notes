@@ -480,4 +480,11 @@ atan2(sin(.4), cos(42))
 * so we put every function into its own module, where you can have multiple definitions of a function (unlike in a module, where every function myst be unique)
 * KaleidoscopeJIT will always return the msot recent definition
 * for each funciton to live in its own module, we must have a way regenerate prev function declarations in new modules
-*
+
+
+### Notes from Section 5:
+* `opt` has good vizualization features
+* ex. `llvm-as < t.ll | opt -analyze -view-cfg`
+* can also insert `F->viewCFG()` (where F is a function) into code directly
+* all basic blocks must be terminated by a control flow statement (return, branch) else the verifyer emits an error
+
