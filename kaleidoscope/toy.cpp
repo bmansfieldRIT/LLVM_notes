@@ -4,33 +4,53 @@
 * by Brian Mansfield
 */
 
-#include <cstdlib>
 #include <algorithm>
+#include <cassert>
 #include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
-#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Target/TargetMachine.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Scalar/GVN.h"
+#include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/ExecutionEngine/JITSymbol.h"
+#include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
+#include "llvm/ExecutionEngine/SectionMemoryManager.h"
+#include "llvm/ExecutionEngine/Orc/CompileUtils.h"
+#include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
+#include "llvm/ExecutionEngine/Orc/LambdaResolver.h"
+#include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
 #include "KaleidoscopeJIT.h"
 
 using namespace llvm;
+using namespace llvm::orc;
 
 static LLVMContext TheContext;
 static IRBuilder<> Builder(TheContext);
 static std::unique_ptr<Module> TheModule;
 static std::map<std::string, Value *> NamedValues;
 static std::unique_ptr<KaleidoscopeJIT> TheJIT;
+static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
+
 
 // lexer returns tokens [0-255] if it is an unknown character, otherwise one
 // of these for known things
@@ -43,7 +63,12 @@ enum Token {
 
     //primary
     tok_identifier = -4,
-    tok_number = -5
+    tok_number = -5,
+
+    // control flow
+    tok_if = -6,
+    tok_then = -7,
+    tok_else = -8,
 };
 
 static std::string IdentifierStr; // filled in if tok_identifier
@@ -65,6 +90,12 @@ static int gettok() {
             return tok_def;
         if (IdentifierStr == "extern")
             return tok_extern;
+        if (IdentifierStr == "if")
+            return tok_if;
+        if (IdentifierStr == "then")
+            return tok_then;
+        if (IdentifierStr == "else")
+            return tok_else;
         return tok_identifier;
     }
 
@@ -134,6 +165,17 @@ public:
         : Op(op), LHS(std::move(LHS)), RHS(std::move(RHS)) {}
     Value *codegen() override;
 };
+
+
+class IfExprAST : public ExprAST {
+    std::unique_ptr<ExprAST> Cond, Then, Else;
+public:
+    IfExprAST(std::unique_ptr<ExprAST> Cond, std::unique_ptr<ExprAST> Then,
+              std::unique_ptr<ExprAST> Else)
+    : Cond(std::move(Cond)), Then(std::move(Then)), Else(std::move(Else)) {}
+    Value *codegen() override;
+};
+
 
 // CallExprAST - Expression class for function calls
 class CallExprAST : public ExprAST {
@@ -207,6 +249,33 @@ static std::unique_ptr<ExprAST> ParseNumberExpr() {
 
 static std::unique_ptr<ExprAST> ParseExpression();
 
+
+static std::unique_ptr<ExprAST> ParseIfExpr() {
+    getNextToken();
+    auto Cond = ParseExpression();
+    if (!Cond)
+        return nullptr;
+
+    if (CurTok != tok_then)
+        return LogError("expected then");
+    getNextToken();
+
+    auto Then = ParseExpression();
+    if (!Then)
+        return nullptr;
+
+    if (CurTok != tok_else)
+        return LogError("expected else");
+    getNextToken();
+
+    auto Else = ParseExpression();
+    if (!Else)
+        return nullptr;
+
+    return llvm::make_unique<IfExprAST>(std::move(Cond), std::move(Then),
+                                        std::move(Else));
+}
+
 // parenexpr ::= '(' expression ')'
 static std::unique_ptr<ExprAST> ParseParenExpr() {
     getNextToken(); // eat (.
@@ -270,6 +339,8 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
         return ParseNumberExpr();
     case '(':
         return ParseParenExpr();
+    case tok_if:
+        return ParseIfExpr();
     }
 }
 
@@ -388,6 +459,21 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
     return nullptr;
 }
 
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
+
+Function *getFunction(std::string Name){
+    // see if function has already been added to the current module
+    if (auto *F = TheModule->getFunction(Name))
+        return F;
+
+    // if not, check whether we can codegen the declaration from some existing prototype
+    auto FI = FunctionProtos.find(Name);
+    if (FI != FunctionProtos.end())
+        return FI->second->codegen();
+
+    return nullptr;
+}
+
 Value *NumberExprAST::codegen() {
     return ConstantFP::get(TheContext, APFloat(Val));
 }
@@ -422,9 +508,63 @@ Value *BinaryExprAST::codegen() {
     }
 }
 
+
+Value *IfExprAST::codegen(){
+    Value *CondV = Cond->codegen();
+    if (!CondV)
+        return nullptr;
+
+    // convert condition to a bool by comparing non-equal to 0.0
+    CondV = Builder.CreateFCmpONE(
+        CondV, ConstantFP::get(TheContext, APFloat(0.0)), "ifcond");
+
+    Function *TheFunction = Builder.GetInsertBlock()->getParent();
+
+    // create blocks for the then and else cases. Insert the 'then' block at the end of the function
+    BasicBlock *ThenBB = BasicBlock::Create(TheContext, "then", TheFunction);
+    BasicBlock *ElseBB = BasicBlock::Create(TheContext, "else");
+    BasicBlock *MergeBB = BasicBlock::Create(TheContext, "ifcont");
+
+    Builder.CreateCondBr(CondV, ThenBB, ElseBB);
+
+    // emit then value
+    Builder.SetInsertPoint(ThenBB);
+
+    Value *ThenV = Then->codegen();
+    if(!ThenV)
+        return nullptr;
+
+    Builder.CreateBr(MergeBB);
+    // codegen of 'Then' can change the current block, update ThenBB for the PHI
+    ThenBB = Builder.GetInsertBlock();
+
+    // emit else block
+    TheFunction->getBasicBlockList().push_back(ElseBB);
+    Builder.SetInsertPoint(ElseBB);
+
+    Value *ElseV = Else->codegen();
+    if (!ElseV)
+        return nullptr;
+
+    Builder.CreateBr(MergeBB);
+    // codegen of 'Else' can change the current block, update ElseBB for the PHI.
+    ElseBB = Builder.GetInsertBlock();
+
+    // emit merge block
+    TheFunction->getBasicBlockList().push_back(MergeBB);
+    Builder.SetInsertPoint(MergeBB);
+    PHINode *PN =
+        Builder.CreatePHI(Type::getDoubleTy(TheContext), 2, "iftmp");
+
+    PN->addIncoming(ThenV, ThenBB);
+    PN->addIncoming(ElseV, ElseBB);
+    return PN;
+}
+
+
 Value *CallExprAST::codegen(){
     // look up the name in the global module table
-    Function *CalleeF = TheModule->getFunction(Callee);
+    Function *CalleeF = getFunction(Callee);
     if (!CalleeF)
         return LogErrorV("Unknown function referenced");
 
@@ -460,14 +600,14 @@ Function *PrototypeAST::codegen(){
 }
 
 Function *FunctionAST::codegen(){
-    // first, check for an existing function from a previous 'extern' declaration
-    Function *TheFunction = TheModule->getFunction(Proto->getName());
-    if (!TheFunction)
-        TheFunction = Proto->codegen();
+
+    // transfer ownership of the protoype to the functionprotos map, but keep a
+    // reference to it for use below
+    auto &P = *Proto;
+    FunctionProtos[Proto->getName()] = std::move(Proto);
+    Function *TheFunction = getFunction(P.getName());
     if (!TheFunction)
         return nullptr;
-    if (!TheFunction->empty())
-        return (Function*)LogErrorV("Function cannot be redefined");
 
     // create a new basic block to start insertion into
     BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
@@ -498,19 +638,19 @@ Function *FunctionAST::codegen(){
 
 void InitializeModuleAndPassManager(){
     // open a new module
-    TheModule = llvm::make_unique<Module>("mycool jit", TheContext)
+    TheModule = llvm::make_unique<Module>("my cool jit", TheContext);
     TheModule->setDataLayout(TheJIT->getTargetMachine().createDataLayout());
 
     // create a new pass manager attached to it
-    TheFPM = llvm::make_unique<FunctionPassManager>(TheModule.get());
+    TheFPM = llvm::make_unique<legacy::FunctionPassManager>(TheModule.get());
     // do simple 'peephole' optimizations and bit-twiddling optimizations
-    TheFPM->add(createIntructionCombiningPass());
+    TheFPM->add(llvm::createInstructionCombiningPass());
     // reassociate expressions
-    TheFPM->add(createReassociatePass());
+    TheFPM->add(llvm::createReassociatePass());
     // eliminate common subexpressions
-    TheFPM->add(createGVNPass());
+    TheFPM->add(llvm::createNewGVNPass());
     // simplify the control flow graph (delete unreachable block, etc.)
-    TheFPM->add(createCFGSimplificationPass());
+    TheFPM->add(llvm::createCFGSimplificationPass());
 
     TheFPM->doInitialization();
 }
@@ -521,6 +661,8 @@ static void HandleDefinition() {
             fprintf(stderr, "Read function definition: ");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            TheJIT->addModule(std::move(TheModule));
+            InitializeModuleAndPassManager();
         }
     } else {
         // Skip token for error recovery.
@@ -534,6 +676,7 @@ static void HandleExtern() {
             fprintf(stderr, "Read extern: ");
             FnIR->print(errs());
             fprintf(stderr, "\n");
+            FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
         }
     } else {
         // Skip token for error recovery.
@@ -543,11 +686,29 @@ static void HandleExtern() {
 
 static void HandleTopLevelExpression() {
     // Evaluate a top-level expression into an anonymous function.
-    if (auto FnAST = ParseTopLevelExpr()) {
-        if (auto *FnIR = FnAST->codegen()){
-            fprintf(stderr, "Read top-level expr: ");
-            FnIR->print(errs());
+    if (auto ExprAST = ParseTopLevelExpr()) {
+        if (auto *ExprIR = ExprAST->codegen()){
+            fprintf(stderr, "Read top-level expression: ");
+            ExprIR->print(errs());
             fprintf(stderr, "\n");
+
+            // JIT the module containing the anaymous expression, keeping a
+            // handle so we can free it later
+            auto H = TheJIT->addModule(std::move(TheModule));
+            InitializeModuleAndPassManager();
+
+            // search the JIT for the __anon_expr symbol
+            auto ExprSymbol = TheJIT->findSymbol("__anon_expr");
+            assert(ExprSymbol && "Function not found");
+
+            // Get the symbols address and cast it to the right type
+            // (takes no arguments, returns a double) so we can call it as a
+            // native function
+            double (*FP)() = (double (*)())(intptr_t)cantFail(ExprSymbol.getAddress());
+            fprintf(stderr, "Evaluated to %f\n", FP());
+
+            // delete the anonymous expression module from the JIT
+            TheJIT->removeModule(H);
         }
     } else {
         // Skip token for error recovery.
@@ -577,11 +738,37 @@ static void MainLoop(){
     }
 }
 
+//===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+  fputc((char)X, stderr);
+  return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X) {
+  fprintf(stderr, "%f\n", X);
+  return 0;
+}
+
+//===----------------------------------------------------------------------===//
+// Main driver code.
+//===----------------------------------------------------------------------===//
+
 int main() {
 
-    InitializeNativeTarget();
-    InitializeNativeTargetAsmPrinter();
-    InitializeNativeTargetAsmParser();
+    LLVMInitializeNativeTarget();
+    LLVMInitializeNativeAsmPrinter();
+    LLVMInitializeNativeAsmParser();
 
     // Install standard binary operators
     // 1 is the lowest precedence
@@ -594,7 +781,9 @@ int main() {
     fprintf(stderr, "ready> ");
     getNextToken();
 
-    TheJit = llvm::make_unique<KaleidoscopeJIT>();
+    TheJIT = llvm::make_unique<KaleidoscopeJIT>();
+
+    InitializeModuleAndPassManager();
 
     // run the main interpreter loop now
     MainLoop();
