@@ -47,7 +47,7 @@ using namespace llvm::orc;
 static LLVMContext TheContext;
 static IRBuilder<> Builder(TheContext);
 static std::unique_ptr<Module> TheModule;
-static std::map<std::string, Value *> NamedValues;
+static std::map<std::string, AllocaInst*> NamedValues;
 static std::unique_ptr<KaleidoscopeJIT> TheJIT;
 static std::unique_ptr<legacy::FunctionPassManager> TheFPM;
 
@@ -72,6 +72,9 @@ enum Token {
 
     tok_for = -9,
     tok_in = -10,
+
+    tok_binary = -11,
+    tok_unary = -12,
 };
 
 static std::string IdentifierStr; // filled in if tok_identifier
@@ -103,6 +106,10 @@ static int gettok() {
             return tok_for;
         if (IdentifierStr == "in")
             return tok_in;
+        if (IdentifierStr == "binary")
+            return tok_binary;
+        if (IdentifierStr == "unary")
+            return tok_unary;
         return tok_identifier;
     }
 
@@ -214,12 +221,25 @@ public:
 class PrototypeAST {
     std::string Name;
     std::vector<std::string> Args;
+    bool IsOperator;
+    unsigned Precedence; // precedence if a binary op
 
 public:
-    PrototypeAST(const std::string &Name, std::vector<std::string> Args)
-        : Name(Name), Args(std::move(Args)) {}
+    PrototypeAST(const std::string &Name, std::vector<std::string> Args,
+                bool IsOperator = false, unsigned Prec = 0)
+        : Name(Name), Args(std::move(Args), IsOperator(IsOperator), Precedence(Prec)) {}
     const std::string &getName() const { return Name; }
     Function *codegen();
+
+    bool isUnaryOp() const { return IsOperator && Args.size() == 1; }
+    bool isBinaryOp() const { return IsOperator && Args.size() == 2; }
+
+    char getOperatorName() const {
+        assert(isUnaryOp() || isBinaryOp());
+        return Name[Name.size() - 1];
+    }
+
+    unsigned getBinaryPrecedence() const { return Precedence; }
 };
 
 // FunctionAST - represents a function definition itself
@@ -477,12 +497,39 @@ static std::unique_ptr<ExprAST> ParseExpression() {
 
 // prototype
 //  ::= id '(' id* ')'
+//  ::= binary LETTER number? (id, id)
 static std::unique_ptr<PrototypeAST> ParsePrototype() {
-    if (CurTok != tok_identifier)
-        return LogErrorP("Expected function name in prototype");
+    std::string FnName;
 
-    auto FnName = IdentifierStr;
-    getNextToken();
+    unsigned Kind = 0; // 0 = identifier, 1 = unary, 2 = binary
+    unsigned BinaryPrecedence = 30;
+
+    switch (CurTok){
+    default:
+        return LogErrorP("Expected function name in prototype");
+    case tok_identifier:
+        FnName = IdentifierStr;
+        Kind = 0;
+        getNextToken();
+        break;
+    case tok_binary:
+        getNextToken();
+        if (!isascii(CurTok))
+            return LogErrorP("Expected binary operator");
+        FnName = "binary";
+        FnName += (char)CurTok;
+        Kind = 2;
+        getNextToken();
+
+        // read the precedence if present
+        if (CurTok == tok_number){
+            if (NumVal < 1 || NumVal > 100)
+                return LogErrorP("invalid precedence: must be 1..100");
+            BinaryPrecedence = (unsigned)NumVal;
+            getNextToken();
+        }
+        break;
+    }
 
     if (CurTok != '(')
         return LogErrorP("Expected '(' in prototype");
@@ -497,7 +544,12 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     // success
     getNextToken(); // eat ')'
 
-    return llvm::make_unique<PrototypeAST>(FnName, std::move(ArgNames));
+    // verify right number of names for operator
+    if (Kind && ArgNames.size() != Kind)
+        return LogErrorP("Invalid number of operands for operator");
+
+    return llvm::make_unique<PrototypeAST>(FnName, std::move(ArgNames), Kind != 0,
+                                            BinaryPrecedence);
 }
 
 // definition ::= 'def' prototype expression
@@ -529,6 +581,15 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
 
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
 
+// CreateEntryBlockAlloca - Create an alloca instruction in the entry block of
+// the function. This is used for mutable variables, etc.
+static AllocaInst *CreateEntryBlockAlloca(Function *TheFunction,
+                                            const std::string &VarName){
+    IRBuilder<> TmpB(&TheFunction->getEntryBlock(),
+                    TheFunction->getEntryBLock().begin());
+    return TmpB.createAlloca(Type:getBoubleTy(TheContext), 0, Varname.c_str());
+}
+
 Function *getFunction(std::string Name){
     // see if function has already been added to the current module
     if (auto *F = TheModule->getFunction(Name))
@@ -551,7 +612,9 @@ Value *VariableExprAST::codegen() {
     Value *V = NamedValues[Name];
     if (!V)
         LogErrorV("Unknown variable name");
-    return V;
+
+    // load the value.
+    return Builder.CreateLoad(V, Name.c_str());
 }
 
 Value *BinaryExprAST::codegen() {
@@ -572,8 +635,16 @@ Value *BinaryExprAST::codegen() {
         // convert boolean 0 or 1 to double 0.0 or 1.0
         return Builder.CreateUIToFP(L, Type::getDoubleTy(TheContext), "booltmp");
     default:
-        return LogErrorV("invalid binary operator");
+        break;
     }
+
+    // if it wasn't a builtin binary operator, it must be a user defined one. emit
+    // a call to it.
+    Function *F = getFunction(std::string("binary") + Op);
+    assert(F && "binary operator not found!");
+
+    Value *Ops[2] = { L, R };
+    return Builder.CreateCall(F, Ops, "binop");
 }
 
 
@@ -630,14 +701,21 @@ Value *IfExprAST::codegen(){
 }
 
 Value *ForExprAST::codegen(){
+    // make the new basic block for the loop header, inserting after current block
+    Function *TheFunction = Builder.GetInsertBlock()->getParent();
+
+    // Create an alloca for the variable in the entry block.
+    AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
+
     // emit the start code first, without 'variable' in scope
     Value *InitVal = Init->codegen();
     if (!InitVal)
         return nullptr;
 
-    // make the new basic block for the loop header, inserting after current block
-    Function *TheFunction = Builder.GetInsertBlock()->getParent();
-    BasicBlock *PreheaderBB = Builder.GetInsertBlock();
+    // store the value into the alloca
+    Builder.CreateStore(StarVal, Alloca);
+
+    // make the new basic block for the loop header, inserting after current block.
     BasicBlock *LoopBB = BasicBlock::Create(TheContext, "loop", TheFunction);
 
     // insert an explicit fall through from the current block to the LoopBB
@@ -646,15 +724,10 @@ Value *ForExprAST::codegen(){
     // start insertion in LoopBB
     Builder.SetInsertPoint(LoopBB);
 
-    // start the PHI node with an entry for Init.
-    PHINode *Variable = Builder.CreatePHI(Type::getDoubleTy(TheContext),
-                        2, VarName.c_str());
-    Variable->addIncoming(InitVal, PreheaderBB);
-
-    // within the loop, the variable is defined equal to the PHI node. If it
-    // shadows an existing variable, we have to restore it, so save it now.
-    Value *OldVal = NamedValues[VarName];
-    NamedValues[VarName] = Variable;
+    // within the loop, the variable is defined equal to the phi node. If it
+    // shadows an existing variable, we have to restore it, so save it now
+    AllocaInst *OldVal = NamedValues[VarName];
+    NamedValues[VarName] = Alloca;
 
     // emit the body of the loop. this, like any other expr, can change the
     // current BB. Note that we ignore the value computed by the body, but don't
@@ -673,29 +746,29 @@ Value *ForExprAST::codegen(){
         StepVal = ConstantFP::get(TheContext, APFloat(1.0));
     }
 
-    Value *NextVar = Builder.CreateFAdd(Variable, StepVal, "nextvar");
-
     // compute the end condition
     Value *EndCond = Cond->codegen();
     if (!EndCond)
         return nullptr;
 
+    // reload, increment, and restore the alloca. This handles the case where
+    // the body of the loop mutates the variable
+    Value *CurVar = Builder.CreateLoad(Alloca, VarName.c_str());
+    Value *NextVar = Builder.CreateFAdd(CurVar, StepVal, "nextvar");
+    Builder.CreateStore(NextVar, Alloca);
+
     // convert condition to a bool by comparing non-equal to 0.0
     EndCond = Builder.CreateFCmpONE(
         EndCond, ConstantFP::get(TheContext, APFloat(0.0)), "loopcond");
 
-    // crate the "after loop" block and insert it
-    BasicBlock *LoopEndBB = Builder.GetInsertBlock();
-    BasicBlock *AfterBB = BasicBlock::Create(TheContext, "afterloop", TheFunction);
+    BasicBlock *AfterBB =
+        BasicBlock::Create(TheContext, "afterloop", TheFunction);
 
     // insert the conditional branch into the end of LoopEndBB
     Builder.CreateCondBr(EndCond, LoopBB, AfterBB);
 
     // any new code will be inserted in AfterBB
     Builder.SetInsertPoint(AfterBB);
-
-    // add a new entry to the PHI node for the backedge
-    Variable->addIncoming(NextVar, LoopEndBB);
 
     // restore the unshadowed Variable
     if (OldVal)
@@ -755,6 +828,10 @@ Function *FunctionAST::codegen(){
     if (!TheFunction)
         return nullptr;
 
+    // if this is an operator, install it
+    if (P.isBinaryOp())
+        BinopPrecedence[P.getOperatorName()] = P.getBinaryPrecedence();
+
     // create a new basic block to start insertion into
     BasicBlock *BB = BasicBlock::Create(TheContext, "entry", TheFunction);
     Builder.SetInsertPoint(BB);
@@ -762,7 +839,14 @@ Function *FunctionAST::codegen(){
     // record the function argument in the NamedValue map
     NamedValues.clear();
     for (auto &Arg : TheFunction->args())
-        NamedValues[Arg.getName()] = &Arg;
+        // create an alloca for this variable
+        AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, Arg.getName());
+
+        // Store the initial value into the alloca
+        Builder.CreateStore(&Arg, Alloca);
+
+        // add arguments to variable symbol table
+        NamedValues[Arg.getName()] = Alloca;
 
     if (Value *RetVal = Body->codegen()){
         // finish off the function
@@ -789,6 +873,8 @@ void InitializeModuleAndPassManager(){
 
     // create a new pass manager attached to it
     TheFPM = llvm::make_unique<legacy::FunctionPassManager>(TheModule.get());
+    // Promote allocas to registers
+    TheFPM->add(llvm::createPromoteMemoryToRegisterPass());
     // do simple 'peephole' optimizations and bit-twiddling optimizations
     TheFPM->add(llvm::createInstructionCombiningPass());
     // reassociate expressions
