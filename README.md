@@ -488,3 +488,26 @@ atan2(sin(.4), cos(42))
 * can also insert `F->viewCFG()` (where F is a function) into code directly
 * all basic blocks must be terminated by a control flow statement (return, branch) else the verifyer emits an error
 
+### Notes from Chapter 7:
+* language so far is functional, 'easy' to generate llvm IR
+* LLVM requires register values to be SSA, does not require memory objects to be SSA
+* so we want to make a stack variable (in memory) for each mutable object in a function
+* `@G` defines space for a i32 in global data area, but the name actually refers to the address for that space
+* stack variables work same way, except instead of declared with global variable definitions, they are declared with LLVM alloca instruction
+* so now, we can handle arbitrary mutable variables without phi node
+    1. each mutable variables becomes a stack allocation
+    2. each read of the variable becomes a load from the stack
+    3. each update of the variable becomes a store to the stack
+    4. taking the address of a variable just uses the stack address directly
+* now we have a lot of stack traffic for simple/common operations, performance problems
+* optimization pass called `memtoreg` handles this, promoting allocas into SSA registers, inserting phi nodes where needed
+* `memtoreg` implements iterated dominance fronteir algorithm for constructing SSA form
+* only works in certain circumstances:
+    1. alloca-driven: looks for allocas and if possible, promotes them to registers. does not apply to globals or heap allocations
+    2. looks for alloca instructinos in entry block of function. Being in entry block guarentees alloca is only executed once, for simpler analysis.
+    3. promotes allocas whose uses are direct stores and loads. if address of stack object is passes to function, or pointer arithmetic is involved, alloca will not be promoted
+    4. works on allocas of first class values only, and only is array size of allocation is 1. not capable of promoting structs or arrays to registers. The `sroa` pass is more powerful and can promote structs, unions, and arrays.
+* Reasons to use `memtoreg`:
+    1. Proven & well-tested. used by clang, common clients of LLVM use this to handle bulk of variables. bugs are found fast and fixed early.
+    2. Extremely fast. A number of special cases make it fast in common cases. fast paths for variables only used in a single block, variables with only one assignment point, good heuristics to avoid insertion of uneeded phi nodes.
+    3. Needed for debug info generation. LLVM debug info relies on having address of variable exposed to attach debug info.
