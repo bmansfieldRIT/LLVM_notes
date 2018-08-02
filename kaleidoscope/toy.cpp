@@ -4,16 +4,6 @@
 * by Brian Mansfield
 */
 
-#include <algorithm>
-#include <cassert>
-#include <cctype>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <map>
-#include <memory>
-#include <string>
-#include <vector>
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
@@ -21,6 +11,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -31,14 +22,18 @@
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
-#include "llvm/ExecutionEngine/ExecutionEngine.h"
-#include "llvm/ExecutionEngine/JITSymbol.h"
-#include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
-#include "llvm/ExecutionEngine/SectionMemoryManager.h"
-#include "llvm/ExecutionEngine/Orc/CompileUtils.h"
-#include "llvm/ExecutionEngine/Orc/IRCompileLayer.h"
-#include "llvm/ExecutionEngine/Orc/LambdaResolver.h"
-#include "llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h"
+#include "llvm/Transforms/Utils.h"
+#include <algorithm>
+#include <cassert>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 #include "KaleidoscopeJIT.h"
 
 using namespace llvm;
@@ -180,6 +175,18 @@ public:
     Value *codegen() override;
 };
 
+// UnaryExprAST - Expression class for a unary operator
+class UnaryExprAST : public ExprAST {
+    char Opcode;
+    std::unique_ptr<ExprAST> Operand;
+
+public:
+    UnaryExprAST(char Opcode, std::unique_ptr<ExprAST> Operand)
+    : Opcode(Opcode), Operand(std::move(Operand)) {}
+
+    Value *codegen() override;
+};
+
 // IfExprAST - Expression class for if-then-else control flow statements
 class IfExprAST : public ExprAST {
     std::unique_ptr<ExprAST> Cond, Then, Else;
@@ -227,7 +234,7 @@ class PrototypeAST {
 public:
     PrototypeAST(const std::string &Name, std::vector<std::string> Args,
                 bool IsOperator = false, unsigned Prec = 0)
-        : Name(Name), Args(std::move(Args), IsOperator(IsOperator), Precedence(Prec)) {}
+        : Name(Name), Args(std::move(Args)), IsOperator(IsOperator), Precedence(Prec) {}
     const std::string &getName() const { return Name; }
     Function *codegen();
 
@@ -287,7 +294,23 @@ static std::unique_ptr<ExprAST> ParseNumberExpr() {
 }
 
 static std::unique_ptr<ExprAST> ParseExpression();
+static std::unique_ptr<ExprAST> ParsePrimary();
 
+// unary
+//      ::= primary
+//      ::= '!' unary
+static std::unique_ptr<ExprAST> ParseUnary() {
+    // if the current token is not an operator, it must be a primary expr
+    if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
+        return ParsePrimary();
+
+    // if this is a unary operator, read it
+    int Opc = CurTok;
+    getNextToken();
+    if (auto Operand = ParseUnary())
+        return llvm::make_unique<UnaryExprAST>(Opc, std::move(Operand));
+    return nullptr;
+}
 
 static std::unique_ptr<ExprAST> ParseIfExpr() {
     getNextToken();
@@ -451,7 +474,7 @@ static int GetTokPrecedence(){
 }
 
 // binopsrhs
-//  := ('+' primary)*
+//  := ('+' unary)*
 static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
                                                std::unique_ptr<ExprAST> LHS){
     // if this is a binop, find its precedence
@@ -467,7 +490,7 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
         getNextToken(); // eat binop
 
         // Parse the primary expression after the binary operator
-        auto RHS = ParsePrimary();
+        auto RHS = ParseUnary();
         if(!RHS)
             return nullptr;
 
@@ -487,13 +510,12 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
 }
 
 static std::unique_ptr<ExprAST> ParseExpression() {
-    auto LHS = ParsePrimary();
+    auto LHS = ParseUnary();
     if (!LHS)
         return nullptr;
 
     return ParseBinOpRHS(0, std::move(LHS));
 }
-
 
 // prototype
 //  ::= id '(' id* ')'
@@ -510,6 +532,15 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     case tok_identifier:
         FnName = IdentifierStr;
         Kind = 0;
+        getNextToken();
+        break;
+    case tok_unary:
+        getNextToken();
+        if (!isascii(CurTok))
+            return LogErrorP("Expected unary operator");
+        FnName = "unary";
+        FnName += (char)CurTok;
+        Kind = 1;
         getNextToken();
         break;
     case tok_binary:
@@ -586,8 +617,8 @@ static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
 static AllocaInst *CreateEntryBlockAlloca(Function *TheFunction,
                                             const std::string &VarName){
     IRBuilder<> TmpB(&TheFunction->getEntryBlock(),
-                    TheFunction->getEntryBLock().begin());
-    return TmpB.createAlloca(Type:getBoubleTy(TheContext), 0, Varname.c_str());
+                    TheFunction->getEntryBlock().begin());
+    return TmpB.CreateAlloca(Type::getDoubleTy(TheContext), 0, VarName.c_str());
 }
 
 Function *getFunction(std::string Name){
@@ -618,6 +649,27 @@ Value *VariableExprAST::codegen() {
 }
 
 Value *BinaryExprAST::codegen() {
+    // special case '=' because we don't want to emit the LHS as an expression
+    if (Op == '='){
+        // assignment requires the LHS to be an identifier
+        VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(LHS.get());
+        if (!LHSE)
+            return LogErrorV("destiniation of '=' must be a variable");
+
+        // codegen the RHS
+        Value *Val = RHS->codegen();
+        if (Val)
+            return nullptr;
+
+        // look up the name
+        Value *Variable = NamedValue[LHSE->getName()];
+        if (!Variable)
+            return LogErrorV("unknown variable name");
+
+        BuilderCreateStore(Val, Variable);
+        return Val;
+    }
+
     Value *L = LHS->codegen();
     Value *R = RHS->codegen();
     if (!L || !R)
@@ -647,6 +699,17 @@ Value *BinaryExprAST::codegen() {
     return Builder.CreateCall(F, Ops, "binop");
 }
 
+Value *UnaryExprAST::codegen() {
+    Value *OperandV = Operand->codegen();
+    if (!OperandV)
+        return nullptr;
+
+    Function *F = getFunction(std::string("unary") + Opcode);
+    if (!F)
+        return LogErrorV("Unknown unary operator");
+
+    return Builder.CreateCall(F, OperandV, "unop");
+}
 
 Value *IfExprAST::codegen(){
     Value *CondV = Cond->codegen();
@@ -713,7 +776,7 @@ Value *ForExprAST::codegen(){
         return nullptr;
 
     // store the value into the alloca
-    Builder.CreateStore(StarVal, Alloca);
+    Builder.CreateStore(InitVal, Alloca);
 
     // make the new basic block for the loop header, inserting after current block.
     BasicBlock *LoopBB = BasicBlock::Create(TheContext, "loop", TheFunction);
@@ -838,7 +901,7 @@ Function *FunctionAST::codegen(){
 
     // record the function argument in the NamedValue map
     NamedValues.clear();
-    for (auto &Arg : TheFunction->args())
+    for (auto &Arg : TheFunction->args()){
         // create an alloca for this variable
         AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, Arg.getName());
 
@@ -847,7 +910,7 @@ Function *FunctionAST::codegen(){
 
         // add arguments to variable symbol table
         NamedValues[Arg.getName()] = Alloca;
-
+    }
     if (Value *RetVal = Body->codegen()){
         // finish off the function
         Builder.CreateRet(RetVal);
@@ -916,6 +979,28 @@ static void HandleExtern() {
     }
 }
 
+//===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+  fputc((char)X, stderr);
+  return 0;
+}
+
+/// printd - printf that takes a double prints it as "%f\n", returning 0.
+extern "C" DLLEXPORT double printd(double X) {
+  fprintf(stderr, "%f\n", X);
+  return 0;
+}
+
 static void HandleTopLevelExpression() {
     // Evaluate a top-level expression into an anonymous function.
     if (auto ExprAST = ParseTopLevelExpr()) {
@@ -971,28 +1056,6 @@ static void MainLoop(){
 }
 
 //===----------------------------------------------------------------------===//
-// "Library" functions that can be "extern'd" from user code.
-//===----------------------------------------------------------------------===//
-
-#ifdef _WIN32
-#define DLLEXPORT __declspec(dllexport)
-#else
-#define DLLEXPORT
-#endif
-
-/// putchard - putchar that takes a double and returns 0.
-extern "C" DLLEXPORT double putchard(double X) {
-  fputc((char)X, stderr);
-  return 0;
-}
-
-/// printd - printf that takes a double prints it as "%f\n", returning 0.
-extern "C" DLLEXPORT double printd(double X) {
-  fprintf(stderr, "%f\n", X);
-  return 0;
-}
-
-//===----------------------------------------------------------------------===//
 // Main driver code.
 //===----------------------------------------------------------------------===//
 
@@ -1004,6 +1067,7 @@ int main() {
 
     // Install standard binary operators
     // 1 is the lowest precedence
+    BinopPrecedence['='] = 2;
     BinopPrecedence['<'] = 10;
     BinopPrecedence['+'] = 20;
     BinopPrecedence['-'] = 30;
