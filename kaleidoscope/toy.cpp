@@ -70,6 +70,9 @@ enum Token {
 
     tok_binary = -11,
     tok_unary = -12,
+
+    // var definition
+    tok_var = -13,
 };
 
 static std::string IdentifierStr; // filled in if tok_identifier
@@ -105,6 +108,8 @@ static int gettok() {
             return tok_binary;
         if (IdentifierStr == "unary")
             return tok_unary;
+        if (IdentifierStr == "var")
+            return tok_var;
         return tok_identifier;
     }
 
@@ -162,6 +167,18 @@ public:
     VariableExprAST(const std::string &Name) : Name(Name) {}
     Value *codegen() override;
 };
+
+// VarExprAST - expression class for var/in
+class VarExprAST : public ExprAST {
+    std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+    std::unique_ptr<ExprAST> Body;
+public:
+    VarExprAST(std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
+                std::unique_ptr<ExprAST> Body)
+    : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
+
+    Value *codegen() override;
+}
 
 // BinaryExprAST - Expression class for a binary operator
 class BinaryExprAST : public ExprAST {
