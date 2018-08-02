@@ -403,6 +403,55 @@ static std::unique_ptr<ExprAST> ParseForExpr(){
 
 }
 
+// varexpr ::= 'var' identifier ('=' expression)?
+//                  (',' identifier ('=' expression)?)* 'in' expression
+static std::unique_ptr<ExprAST> ParseVarExpr(){
+    getNextToken(); // eat the var
+
+    std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+
+    // at least one variable name is required
+    if (CurTok != tok_identifier)
+        return LogERror("expected identifier after var");
+
+    while (1) {
+        std::string Name = IdentifierStr;
+        getNextToken(); // eat identifier
+
+        // read the optional initializer
+        std::unique_ptr<ExprAST> Init;
+        if (CurTok == '='){
+            getNextToken(); // eat the '='.
+
+            Init = ParseExpression();
+            if (!Init)
+                return nullptr;
+        }
+
+        VarNames.push_back(std::make_pair(Name, std::move(Init)));
+
+        // end of var list, exit loop
+        if (CurTok != ',')
+            break;
+        getNextToken(); // eat the ','
+
+        if (CurTok != tok_identifier)
+            return LogError("expected identifier list after var");
+
+        // at this point, we have the 'in'
+        if (CurTok != tok_in)
+            return LogError("Expected 'in' keyword after 'var'");
+        getNextToken(); // eat in
+
+        auto Body = ParseExpression();
+        if (!Body)
+            return nullptr;
+
+        return llvm::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
+    }
+}
+
+
 // parenexpr ::= '(' expression ')'
 static std::unique_ptr<ExprAST> ParseParenExpr() {
     getNextToken(); // eat (.
@@ -470,6 +519,8 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
         return ParseIfExpr();
     case tok_for:
         return ParseForExpr();
+    case tok_var:
+        return ParseVarExpr();
     }
 
 }
