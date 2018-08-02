@@ -767,6 +767,54 @@ Value *BinaryExprAST::codegen() {
     return Builder.CreateCall(F, Ops, "binop");
 }
 
+Value *VarExprAST::codegen() {
+    std::vector<AllocaInst *> OldBindings;
+
+    Function *TheFunction = Builder.GetInsertBlock()->getParent();
+
+    // register all variables and emit their initializer
+    for (unsigned i = 0, e = VarNames.size(); i != e; ++i){
+        const std::string &VarName = VarNames[i].first;
+        ExprAST *Init = VarNames[i].second.get();
+
+        // emit the initializer before adding the variable to scope, this prevents
+        // the initializer from referencing the variable itself, and permits stuff
+        // like this:
+        //      var a = 1 in
+        //          var a = a in ..   # refers to outer 'a'
+        Value *InitVal;
+        if (Init){
+            InitVal = Init->codegen();
+            if (!InitVal)
+                return nullptr;
+        } else { // if not specified, use 0.0
+            InitVal = ConstantFP::get(TheContext, APFloat(0.0));
+        }
+
+        AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
+        Builder.CreateStore(InitVal, Alloca);
+
+        // remember the old variable binding so that we can restore the binding when
+        // we unrecurse
+        OldBindings.push_back(NamedValues[VarName]);
+
+        // remember this binding
+        NamedValues[VarName] == Alloca;
+    }
+
+    // codegen the body, now that all vars are in scope
+    Value *BodyVal = Body->codegen();
+    if (!BodyVal)
+        return nullptr;
+
+    // pop all our variables from scope
+    for (unsigned i = 0, e = VarNames.size(); i != e; ++i)
+        NamedValues[VarNames[i].first] = OldBindings[i];
+
+    // return the body computation
+    return BodyVal;
+}
+
 Value *UnaryExprAST::codegen() {
     Value *OperandV = Operand->codegen();
     if (!OperandV)
