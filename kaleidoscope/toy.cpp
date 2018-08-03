@@ -5,6 +5,7 @@
 */
 
 #include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constants.h"
@@ -17,6 +18,11 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Host.h"
+#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/TargetRegistry.h"
+#include "llvm/Target/TargetOptions.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
@@ -32,12 +38,14 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 #include "KaleidoscopeJIT.h"
 
 using namespace llvm;
 using namespace llvm::orc;
+using namespace llvm::sys;
 
 static LLVMContext TheContext;
 static IRBuilder<> Builder(TheContext);
@@ -166,6 +174,7 @@ class VariableExprAST : public ExprAST {
 public:
     VariableExprAST(const std::string &Name) : Name(Name) {}
     Value *codegen() override;
+    const std::string &getName() const { return Name; }
 };
 
 // VarExprAST - expression class for var/in
@@ -178,7 +187,7 @@ public:
     : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
 
     Value *codegen() override;
-}
+};
 
 // BinaryExprAST - Expression class for a binary operator
 class BinaryExprAST : public ExprAST {
@@ -412,7 +421,7 @@ static std::unique_ptr<ExprAST> ParseVarExpr(){
 
     // at least one variable name is required
     if (CurTok != tok_identifier)
-        return LogERror("expected identifier after var");
+        return LogError("expected identifier after var");
 
     while (1) {
         std::string Name = IdentifierStr;
@@ -438,17 +447,17 @@ static std::unique_ptr<ExprAST> ParseVarExpr(){
         if (CurTok != tok_identifier)
             return LogError("expected identifier list after var");
 
-        // at this point, we have the 'in'
-        if (CurTok != tok_in)
-            return LogError("Expected 'in' keyword after 'var'");
-        getNextToken(); // eat in
-
-        auto Body = ParseExpression();
-        if (!Body)
-            return nullptr;
-
-        return llvm::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
     }
+    // at this point, we have the 'in'
+    if (CurTok != tok_in)
+        return LogError("Expected 'in' keyword after 'var'");
+    getNextToken(); // eat in
+
+    auto Body = ParseExpression();
+    if (!Body)
+        return nullptr;
+
+    return llvm::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
 }
 
 
@@ -672,7 +681,7 @@ static std::unique_ptr<PrototypeAST> ParseExtern(){
 static std::unique_ptr<FunctionAST> ParseTopLevelExpr() {
     if (auto E = ParseExpression()){
         // make an anonymous proto
-        auto Proto = llvm::make_unique<PrototypeAST>("__anon_expr", std::vector<std::string>());
+        auto Proto = llvm::make_unique<PrototypeAST>("main", std::vector<std::string>());
         return llvm::make_unique<FunctionAST>(std::move(Proto), std::move(E));
     }
     return nullptr;
@@ -720,7 +729,7 @@ Value *BinaryExprAST::codegen() {
     // special case '=' because we don't want to emit the LHS as an expression
     if (Op == '='){
         // assignment requires the LHS to be an identifier
-        VariableExprAST *LHSE = dynamic_cast<VariableExprAST*>(LHS.get());
+        VariableExprAST *LHSE = static_cast<VariableExprAST*>(LHS.get());
         if (!LHSE)
             return LogErrorV("destiniation of '=' must be a variable");
 
@@ -730,11 +739,11 @@ Value *BinaryExprAST::codegen() {
             return nullptr;
 
         // look up the name
-        Value *Variable = NamedValue[LHSE->getName()];
+        Value *Variable = NamedValues[LHSE->getName()];
         if (!Variable)
             return LogErrorV("unknown variable name");
 
-        BuilderCreateStore(Val, Variable);
+        Builder.CreateStore(Val, Variable);
         return Val;
     }
 
@@ -799,7 +808,7 @@ Value *VarExprAST::codegen() {
         OldBindings.push_back(NamedValues[VarName]);
 
         // remember this binding
-        NamedValues[VarName] == Alloca;
+        NamedValues[VarName] = Alloca;
     }
 
     // codegen the body, now that all vars are in scope
@@ -1151,7 +1160,6 @@ static void HandleTopLevelExpression() {
 
 static void MainLoop(){
     while (true){
-        fprintf(stderr, "ready> ");
         switch (CurTok){
         case tok_eof:
             return;
@@ -1190,7 +1198,6 @@ int main() {
     BinopPrecedence['*'] = 40; // highest
 
     // prime the first token
-    fprintf(stderr, "ready> ");
     getNextToken();
 
     TheJIT = llvm::make_unique<KaleidoscopeJIT>();
@@ -1199,6 +1206,57 @@ int main() {
 
     // run the main interpreter loop now
     MainLoop();
+
+    InitializeAllTargetInfos();
+    InitializeAllTargets();
+    InitializeAllTargetMCs();
+    InitializeAllAsmParsers();
+    InitializeAllAsmPrinters();
+
+    auto TargetTriple = sys::getDefaultTargetTriple();
+    TheModule->setTargetTriple(TargetTriple);
+
+    std::string Error;
+    auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
+
+    // print an error and exit if we couldn't find the requested target
+    // this generally occurs is we've forgotten to initialize the
+    // TargetRegistry or we have a bogus target triple
+    if (!Target){
+        errs() << Error;
+        return 1;
+    }
+
+    auto CPU = "generic";
+    auto Features = "";
+
+    TargetOptions opt;
+    auto RM = Optional<Reloc::Model>();
+    auto TargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, opt, RM);
+
+    TheModule->setDataLayout(TargetMachine->createDataLayout());
+
+    auto Filename = "output.o";
+    std::error_code EC;
+    raw_fd_ostream dest(Filename, EC, sys::fs::F_None);
+
+    if (EC){
+        errs() << "Could not open file: " << EC.message();
+        return 1;
+    }
+
+    legacy::PassManager pass;
+    auto FileType = TargetMachine::CGFT_ObjectFile;
+
+    if (TargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)){
+        errs() << "TargetMachine can't emit a file of this type";
+        return 1;
+    }
+
+    pass.run(*TheModule);
+    dest.flush();
+
+    outs() << "Wrote " << Filename << "\n";
 
     return 0;
 }
